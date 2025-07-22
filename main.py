@@ -1,374 +1,318 @@
 import os
 import shutil
-import json
+import uuid
+import argparse
 import platform
-import subprocess
-import random
-import string
-import hashlib
-import datetime
+import json
 import logging
-from pathlib import Path
-from typing import Dict, Any, Optional, List
+from datetime import datetime
 
-class AugmentCodeManager:
-    """AugmentCode环境管理器，用于重置和管理AugmentCode的使用环境"""
-    
-    def __init__(self):
-        """初始化管理器，设置平台相关的路径和配置"""
+class AugmentEnvManager:
+    def __init__(self, verbose=False):
+        """初始化AugmentCode环境管理器"""
+        self.verbose = verbose
         self.system = platform.system()
-        self.config = self._load_config()
-        self.backup_dir = Path(self.config.get('backup_dir', './backups'))
-        self.workspace = Path(self.config.get('workspace', './workspace'))
         
-        # 设置日志
-        self._setup_logging()
-        
-        # 根据不同操作系统设置AugmentCode的配置路径
-        self.augment_paths = self._get_augment_paths()
-        
-        # 确保工作目录存在
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        
-        self.logger.info("AugmentCode管理器已初始化")
-    
-    def _load_config(self) -> Dict[str, Any]:
-        """加载配置文件，如果不存在则创建默认配置"""
-        config_path = Path('config.json')
-        if not config_path.exists():
-            default_config = {
-                "backup_dir": "./backups",
-                "workspace": "./workspace",
-                "reset_strategies": ["device_id", "telemetry_id", "history", "database"],
-                "log_level": "INFO"
-            }
-            with open(config_path, 'w') as f:
-                json.dump(default_config, f, indent=4)
-            return default_config
-        
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    
-    def _setup_logging(self) -> None:
-        """设置日志记录"""
-        log_level = getattr(logging, self.config.get('log_level', 'INFO').upper())
+        # 配置日志
         logging.basicConfig(
-            level=log_level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler("augment_manager.log"),
-                logging.StreamHandler()
-            ]
+            level=logging.INFO if verbose else logging.WARNING,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
-        self.logger = logging.getLogger("AugmentCodeManager")
-    
-    def _get_augment_paths(self) -> Dict[str, Path]:
-        """获取不同操作系统下AugmentCode的配置路径"""
-        if self.system == "Windows":
-            app_data = Path(os.getenv('APPDATA', ''))
-            return {
-                "vscode": app_data / "Code" / "User" / "globalStorage",
-                "augment_config": app_data / "Code" / "User" / "globalStorage" / "augment.augment",
-                "database": app_data / "Code" / "User" / "globalStorage" / "augment.augment" / "state.vscdb",
-                "history": app_data / "Code" / "User" / "globalStorage" / "augment.augment" / "history.json"
-            }
-        elif self.system == "Darwin":  # macOS
-            home = Path.home()
-            return {
-                "vscode": home / "Library" / "Application Support" / "Code" / "User" / "globalStorage",
-                "augment_config": home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "augment.augment",
-                "database": home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "augment.augment" / "state.vscdb",
-                "history": home / "Library" / "Application Support" / "Code" / "User" / "globalStorage" / "augment.augment" / "history.json"
-            }
-        elif self.system == "Linux":
-            home = Path.home()
-            return {
-                "vscode": home / ".config" / "Code" / "User" / "globalStorage",
-                "augment_config": home / ".config" / "Code" / "User" / "globalStorage" / "augment.augment",
-                "database": home / ".config" / "Code" / "User" / "globalStorage" / "augment.augment" / "state.vscdb",
-                "history": home / ".config" / "Code" / "User" / "globalStorage" / "augment.augment" / "history.json"
-            }
-        else:
-            self.logger.error(f"不支持的操作系统: {self.system}")
-            return {}
-    
-    def backup_current_state(self) -> Path:
-        """备份当前AugmentCode的配置和数据"""
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = self.backup_dir / f"backup_{timestamp}"
-        backup_path.mkdir(parents=True, exist_ok=True)
+        self.logger = logging.getLogger('AugmentCodeManager')
         
-        self.logger.info(f"正在备份当前状态到: {backup_path}")
+        # 根据系统设置路径
+        if self.system == "Darwin":  # macOS
+            self.extension_path = os.path.expanduser("~/.vscode/extensions/augment.vscode-augment-0.509.1")
+            self.config_path = os.path.expanduser("~/Library/Application Support/Code/User/globalStorage/augment.vscode-augment")
+            self.workspace_storage = os.path.expanduser("~/Library/Application Support/Code/User/workspaceStorage")
+        elif self.system == "Windows":
+            self.extension_path = os.path.expanduser("~\\.vscode\\extensions\\augment.vscode-augment-0.509.1")
+            self.config_path = os.path.expanduser("~\\AppData\\Roaming\\Code\\User\\globalStorage\\augment.vscode-augment")
+            self.workspace_storage = os.path.expanduser("~\\AppData\\Roaming\\Code\\User\\workspaceStorage")
+        else:  # Linux
+            self.extension_path = os.path.expanduser("~/.vscode/extensions/augment.vscode-augment-0.509.1")
+            self.config_path = os.path.expanduser("~/.config/Code/User/globalStorage/augment.vscode-augment")
+            self.workspace_storage = os.path.expanduser("~/.config/Code/User/workspaceStorage")
         
-        # 备份AugmentCode配置目录
-        if self.augment_paths.get("augment_config") and self.augment_paths["augment_config"].exists():
-            try:
-                shutil.copytree(
-                    self.augment_paths["augment_config"],
-                    backup_path / "augment_config",
-                    dirs_exist_ok=True
-                )
-                self.logger.info("AugmentCode配置备份成功")
-            except Exception as e:
-                self.logger.error(f"备份AugmentCode配置失败: {e}")
+        # 关键文件和目录
+        self.device_id_file = os.path.join(self.config_path, "deviceId.json")
+        self.auth_file = os.path.join(self.config_path, "auth.json")
+        self.history_dir = os.path.join(self.config_path, "history")
+        self.cache_dir = os.path.join(self.config_path, "cache")
+        self.workspace_configs = os.path.join(self.workspace_storage, "*", "Augment.vscode-augment")
         
-        # 备份VSCode全局存储
-        if self.augment_paths.get("vscode") and self.augment_paths["vscode"].exists():
-            try:
-                shutil.copytree(
-                    self.augment_paths["vscode"],
-                    backup_path / "vscode_global_storage",
-                    dirs_exist_ok=True
-                )
-                self.logger.info("VSCode全局存储备份成功")
-            except Exception as e:
-                self.logger.error(f"备份VSCode全局存储失败: {e}")
+        self.logger.info(f"AugmentCode管理器已初始化，系统: {self.system}")
         
-        return backup_path
-    
-    def reset_environment(self, strategies: Optional[List[str]] = None) -> None:
-        """重置AugmentCode的使用环境
-        
-        Args:
-            strategies: 重置策略列表，可选值包括'device_id', 'telemetry_id', 'history', 'database'
-        """
-        if not strategies:
-            strategies = self.config.get('reset_strategies', [])
-        
-        self.logger.info(f"开始重置环境，使用策略: {', '.join(strategies)}")
-        
-        # 确保AugmentCode配置目录存在
-        if not self.augment_paths.get("augment_config") or not self.augment_paths["augment_config"].exists():
+    def backup_env(self):
+        """备份当前环境配置"""
+        if not os.path.exists(self.config_path):
             self.logger.warning("未找到AugmentCode配置目录，可能未安装或路径不正确")
-            return
+            return None
+            
+        backup_path = os.path.join(
+            os.path.expanduser("~"), 
+            "augmentcode_backups", 
+            f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
         
-        # 1. 生成新的设备ID
-        if "device_id" in strategies:
-            self._reset_device_id()
-        
-        # 2. 重置遥测ID
-        if "telemetry_id" in strategies:
-            self._reset_telemetry_id()
-        
-        # 3. 清除使用历史
-        if "history" in strategies:
-            self._clear_history()
-        
-        # 4. 重置数据库
-        if "database" in strategies:
-            self._reset_database()
-        
-        self.logger.info("环境重置完成，请重启VSCode和AugmentCode")
+        try:
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            shutil.copytree(self.config_path, backup_path)
+            self.logger.info(f"环境已备份至: {backup_path}")
+            print(f"✅ 环境已备份至: {backup_path}")
+            return backup_path
+        except Exception as e:
+            self.logger.error(f"备份失败: {e}")
+            print(f"⚠️ 备份失败: {e}")
+            return None
     
-    def _reset_device_id(self) -> None:
-        """重置设备ID"""
-        self.logger.info("重置设备ID")
-        
-        # 生成随机设备ID
-        new_device_id = self._generate_random_id(32)
-        
-        # 查找并替换设备ID
-        device_id_file = self.augment_paths["augment_config"] / "deviceId.json"
-        if device_id_file.exists():
-            try:
-                with open(device_id_file, 'w') as f:
-                    json.dump({"deviceId": new_device_id}, f, indent=2)
-                self.logger.info(f"设备ID已更新为: {new_device_id}")
-            except Exception as e:
-                self.logger.error(f"更新设备ID失败: {e}")
-        else:
-            # 如果文件不存在，创建它
-            try:
-                device_id_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(device_id_file, 'w') as f:
-                    json.dump({"deviceId": new_device_id}, f, indent=2)
-                self.logger.info(f"创建新设备ID文件: {new_device_id}")
-            except Exception as e:
-                self.logger.error(f"创建设备ID文件失败: {e}")
-    
-    def _reset_telemetry_id(self) -> None:
-        """重置遥测ID"""
-        self.logger.info("重置遥测ID")
-        
-        # 生成随机遥测ID
-        new_telemetry_id = self._generate_random_id(36)  # UUID格式
-        
-        # 查找并替换遥测ID
-        telemetry_file = self.augment_paths["augment_config"] / "telemetry.json"
-        if telemetry_file.exists():
-            try:
-                with open(telemetry_file, 'w') as f:
-                    json.dump({"telemetryId": new_telemetry_id}, f, indent=2)
-                self.logger.info(f"遥测ID已更新为: {new_telemetry_id}")
-            except Exception as e:
-                self.logger.error(f"更新遥测ID失败: {e}")
-        else:
-            # 如果文件不存在，创建它
-            try:
-                telemetry_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(telemetry_file, 'w') as f:
-                    json.dump({"telemetryId": new_telemetry_id}, f, indent=2)
-                self.logger.info(f"创建新遥测ID文件: {new_telemetry_id}")
-            except Exception as e:
-                self.logger.error(f"创建遥测ID文件失败: {e}")
-    
-    def _clear_history(self) -> None:
-        """清除AugmentCode的使用历史"""
-        self.logger.info("清除使用历史")
-        
-        history_file = self.augment_paths.get("history")
-        if history_file and history_file.exists():
-            try:
-                with open(history_file, 'w') as f:
-                    json.dump([], f)  # 清空历史记录
-                self.logger.info("使用历史已清除")
-            except Exception as e:
-                self.logger.error(f"清除使用历史失败: {e}")
-    
-    def _reset_database(self) -> None:
-        """重置AugmentCode的数据库"""
-        self.logger.info("重置数据库")
-        
-        database_file = self.augment_paths.get("database")
-        if database_file and database_file.exists():
-            try:
-                # 重命名数据库文件以重置
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_db = database_file.with_name(f"state_backup_{timestamp}.vscdb")
-                database_file.rename(backup_db)
-                self.logger.info(f"数据库已重置，原数据库备份为: {backup_db.name}")
-            except Exception as e:
-                self.logger.error(f"重置数据库失败: {e}")
-    
-    def _generate_random_id(self, length: int) -> str:
-        """生成随机ID
+    def reset_env(self, reset_all=True, reset_device_id=True, reset_auth=True, reset_history=True, reset_cache=True):
+        """重置AugmentCode环境
         
         Args:
-            length: ID长度
-        
-        Returns:
-            随机生成的ID字符串
+            reset_all: 是否重置所有组件
+            reset_device_id: 是否重置设备ID
+            reset_auth: 是否重置认证状态
+            reset_history: 是否重置历史记录
+            reset_cache: 是否重置缓存
         """
-        characters = string.ascii_letters + string.digits
-        return ''.join(random.choice(characters) for i in range(length))
+        print("🚀 开始重置AugmentCode环境...")
+        
+        # 先备份当前环境
+        backup_path = self.backup_env()
+        
+        # 检查配置目录是否存在
+        if not os.path.exists(self.config_path):
+            self.logger.warning("未找到AugmentCode配置目录，可能未安装或路径不正确")
+            print("⚠️ 未找到AugmentCode配置目录，可能未安装或路径不正确")
+            return False
+        
+        # 重置设备ID
+        if reset_all or reset_device_id:
+            if os.path.exists(self.device_id_file):
+                os.remove(self.device_id_file)
+                self.logger.info("已重置设备ID")
+                print("✅ 已重置设备ID")
+            else:
+                self.logger.info("设备ID文件不存在，跳过")
+        
+        # 重置认证状态
+        if reset_all or reset_auth:
+            if os.path.exists(self.auth_file):
+                os.remove(self.auth_file)
+                self.logger.info("已重置认证状态")
+                print("✅ 已重置认证状态")
+            else:
+                self.logger.info("认证文件不存在，跳过")
+        
+        # 清理历史记录
+        if reset_all or reset_history:
+            if os.path.exists(self.history_dir):
+                shutil.rmtree(self.history_dir)
+                os.makedirs(self.history_dir, exist_ok=True)
+                self.logger.info("已清理历史记录")
+                print("✅ 已清理历史记录")
+            else:
+                self.logger.info("历史记录目录不存在，跳过")
+        
+        # 清理缓存
+        if reset_all or reset_cache:
+            if os.path.exists(self.cache_dir):
+                shutil.rmtree(self.cache_dir)
+                os.makedirs(self.cache_dir, exist_ok=True)
+                self.logger.info("已清理缓存")
+                print("✅ 已清理缓存")
+            else:
+                self.logger.info("缓存目录不存在，跳过")
+        
+        # 清理工作区特定配置
+        if reset_all:
+            for workspace_config in self._find_workspace_configs():
+                try:
+                    shutil.rmtree(workspace_config)
+                    self.logger.info(f"已清理工作区配置: {workspace_config}")
+                    print(f"✅ 已清理工作区配置: {os.path.basename(os.path.dirname(workspace_config))}")
+                except Exception as e:
+                    self.logger.error(f"清理工作区配置失败: {e}")
+        
+        print("🎉 环境重置完成！请重启VS Code并重新登录AugmentCode。")
+        return True
     
-    def create_workspace(self, name: str) -> Path:
-        """创建一个新的工作空间
+    def _find_workspace_configs(self):
+        """查找所有工作区特定的AugmentCode配置"""
+        import glob
+        return glob.glob(self.workspace_configs)
+    
+    def create_workspace(self, name):
+        """创建新的工作空间
         
         Args:
             name: 工作空间名称
-        
-        Returns:
-            工作空间路径
         """
-        workspace_path = self.workspace / name
-        workspace_path.mkdir(parents=True, exist_ok=True)
+        workspace_dir = os.path.join(self.config_path, "workspaces", name)
         
-        # 创建工作空间配置
-        config_file = workspace_path / "workspace_config.json"
-        with open(config_file, 'w') as f:
-            json.dump({
+        if os.path.exists(workspace_dir):
+            self.logger.error(f"工作空间 '{name}' 已存在")
+            print(f"❌ 工作空间 '{name}' 已存在")
+            return False
+        
+        try:
+            os.makedirs(workspace_dir, exist_ok=True)
+            
+            # 创建工作区配置
+            config = {
                 "name": name,
-                "created_at": datetime.datetime.now().isoformat(),
-                "device_id": self._generate_random_id(32),
-                "telemetry_id": self._generate_random_id(36)
-            }, f, indent=4)
-        
-        self.logger.info(f"创建新工作空间: {name}")
-        return workspace_path
+                "created_at": datetime.now().isoformat(),
+                "device_id": str(uuid.uuid4()),
+                "description": f"AugmentCode工作区: {name}"
+            }
+            
+            config_path = os.path.join(workspace_dir, "workspace_config.json")
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+            
+            self.logger.info(f"创建工作空间 '{name}' 成功")
+            print(f"✅ 工作空间 '{name}' 创建成功")
+            return True
+        except Exception as e:
+            self.logger.error(f"创建工作空间失败: {e}")
+            print(f"❌ 创建工作空间失败: {e}")
+            return False
     
-    def switch_to_workspace(self, name: str) -> None:
-        """切换到指定的工作空间
+    def switch_workspace(self, name):
+        """切换到指定工作空间
         
         Args:
             name: 工作空间名称
         """
-        workspace_path = self.workspace / name
-        config_file = workspace_path / "workspace_config.json"
+        workspace_dir = os.path.join(self.config_path, "workspaces", name)
         
-        if not config_file.exists():
-            self.logger.error(f"工作空间不存在: {name}")
-            return
+        if not os.path.exists(workspace_dir):
+            self.logger.error(f"工作空间 '{name}' 不存在")
+            print(f"❌ 工作空间 '{name}' 不存在")
+            return False
         
-        # 加载工作空间配置
-        with open(config_file, 'r') as f:
-            config = json.load(f)
+        try:
+            # 备份当前环境
+            self.backup_env()
+            
+            # 加载工作区配置
+            config_path = os.path.join(workspace_dir, "workspace_config.json")
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            
+            # 应用工作区配置
+            self._apply_workspace_config(config)
+            
+            self.logger.info(f"已切换到工作空间 '{name}'")
+            print(f"✅ 已切换到工作空间 '{name}'")
+            print("请重启VS Code使更改生效。")
+            return True
+        except Exception as e:
+            self.logger.error(f"切换工作空间失败: {e}")
+            print(f"❌ 切换工作空间失败: {e}")
+            return False
+    
+    def _apply_workspace_config(self, config):
+        """应用工作区配置
         
-        # 应用工作空间配置
-        self.logger.info(f"切换到工作空间: {name}")
+        Args:
+            config: 工作区配置字典
+        """
+        # 应用设备ID
+        if "device_id" in config:
+            os.makedirs(os.path.dirname(self.device_id_file), exist_ok=True)
+            with open(self.device_id_file, "w") as f:
+                json.dump({"deviceId": config["device_id"]}, f)
         
-        # 更新设备ID
-        device_id_file = self.augment_paths["augment_config"] / "deviceId.json"
-        if device_id_file.exists():
-            with open(device_id_file, 'w') as f:
-                json.dump({"deviceId": config["device_id"]}, f, indent=2)
+        # 可以添加其他配置项的应用逻辑
+    
+    def list_workspaces(self):
+        """列出所有工作空间"""
+        workspaces_dir = os.path.join(self.config_path, "workspaces")
         
-        # 更新遥测ID
-        telemetry_file = self.augment_paths["augment_config"] / "telemetry.json"
-        if telemetry_file.exists():
-            with open(telemetry_file, 'w') as f:
-                json.dump({"telemetryId": config["telemetry_id"]}, f, indent=2)
+        if not os.path.exists(workspaces_dir):
+            print("没有找到工作空间")
+            return []
         
-        self.logger.info(f"已切换到工作空间: {name}")
+        workspaces = []
+        for item in os.listdir(workspaces_dir):
+            item_path = os.path.join(workspaces_dir, item)
+            if os.path.isdir(item_path) and os.path.exists(os.path.join(item_path, "workspace_config.json")):
+                try:
+                    with open(os.path.join(item_path, "workspace_config.json"), "r") as f:
+                        config = json.load(f)
+                    workspaces.append(config)
+                except:
+                    pass
+        
+        if not workspaces:
+            print("没有找到工作空间")
+            return []
+        
+        print("可用的工作空间:")
+        print("-" * 40)
+        for ws in workspaces:
+            print(f"名称: {ws['name']}")
+            print(f"创建时间: {ws['created_at']}")
+            print(f"设备ID: {ws['device_id'][:8]}...")
+            print("-" * 40)
+        
+        return workspaces
 
 def main():
-    """主函数，提供命令行界面"""
-    import argparse
-    
     parser = argparse.ArgumentParser(description="AugmentCode环境管理器")
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", help="可用命令")
+    parser.add_argument("-v", "--verbose", action="store_true", help="启用详细日志")
     
     # 备份命令
     backup_parser = subparsers.add_parser("backup", help="备份当前环境")
     
     # 重置命令
     reset_parser = subparsers.add_parser("reset", help="重置环境")
-    reset_parser.add_argument(
-        "--strategy", 
-        choices=["device_id", "telemetry_id", "history", "database"], 
-        nargs="+",
-        help="指定重置策略，默认使用配置文件中的策略"
-    )
+    reset_parser.add_argument("--all", action="store_true", help="重置所有组件（默认）")
+    reset_parser.add_argument("--device-id", action="store_true", help="仅重置设备ID")
+    reset_parser.add_argument("--auth", action="store_true", help="仅重置认证状态")
+    reset_parser.add_argument("--history", action="store_true", help="仅重置历史记录")
+    reset_parser.add_argument("--cache", action="store_true", help="仅重置缓存")
     
     # 创建工作空间命令
-    create_parser = subparsers.add_parser("create-workspace", help="创建新工作空间")
-    create_parser.add_argument("name", help="工作空间名称")
+    create_ws_parser = subparsers.add_parser("create-workspace", help="创建新工作空间")
+    create_ws_parser.add_argument("name", help="工作空间名称")
     
     # 切换工作空间命令
-    switch_parser = subparsers.add_parser("switch-workspace", help="切换到指定工作空间")
-    switch_parser.add_argument("name", help="工作空间名称")
+    switch_ws_parser = subparsers.add_parser("switch-workspace", help="切换到指定工作空间")
+    switch_ws_parser.add_argument("name", help="工作空间名称")
     
     # 列出工作空间命令
-    list_parser = subparsers.add_parser("list-workspaces", help="列出所有工作空间")
+    list_ws_parser = subparsers.add_parser("list-workspaces", help="列出所有工作空间")
     
-    # 显示帮助信息
     args = parser.parse_args()
     
-    manager = AugmentCodeManager()
+    # 初始化管理器
+    manager = AugmentEnvManager(verbose=args.verbose)
     
+    # 执行命令
     if args.command == "backup":
-        backup_path = manager.backup_current_state()
-        print(f"备份成功: {backup_path}")
-    
+        manager.backup_env()
     elif args.command == "reset":
-        manager.reset_environment(args.strategy)
-        print("环境重置完成，请重启VSCode和AugmentCode")
-    
+        # 确定重置哪些组件
+        if args.all or not any([args.device_id, args.auth, args.history, args.cache]):
+            manager.reset_env(reset_all=True)
+        else:
+            manager.reset_env(
+                reset_all=False,
+                reset_device_id=args.device_id,
+                reset_auth=args.auth,
+                reset_history=args.history,
+                reset_cache=args.cache
+            )
     elif args.command == "create-workspace":
-        workspace_path = manager.create_workspace(args.name)
-        print(f"工作空间创建成功: {workspace_path}")
-    
+        manager.create_workspace(args.name)
     elif args.command == "switch-workspace":
-        manager.switch_to_workspace(args.name)
-        print(f"已切换到工作空间: {args.name}")
-    
+        manager.switch_workspace(args.name)
     elif args.command == "list-workspaces":
-        print("可用工作空间:")
-        for workspace in manager.workspace.iterdir():
-            if workspace.is_dir() and (workspace / "workspace_config.json").exists():
-                print(f"- {workspace.name}")
-    
+        manager.list_workspaces()
     else:
         parser.print_help()
 
